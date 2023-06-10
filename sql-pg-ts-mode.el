@@ -374,6 +374,91 @@
   "Treesitter parser's clause node names")
 
 
+(defun sql-pg-ts-mode-default-schema ()
+  "public")
+
+
+(defun sql-pg-ts-mode--extract-join-clause (node)
+  (let* ((children (treesit-node-children node))
+         (child (car children))
+         (schema1 (sql-pg-ts-mode-default-schema))
+         (name1 nil)
+         (alias1 nil)
+         (schema2 (sql-pg-ts-mode-default-schema))
+         (name2 nil)
+         (alias2 nil)         (result '()))
+    (while children
+      (let ((child (car children)))
+        (pcase (treesit-node-type child)
+          ("join_clause"
+           (setq result (sql-pg-ts-mode--extract-join-clause child)))
+          ("dotted_name"
+           (let ((dotted (treesit-node-children child)))
+             (if name1
+                 (progn
+                   (setq schema2 (treesit-node-text (car dotted) t))
+                   (setq name2 (treesit-node-text (caddr dotted) t)))
+               (setq schema1 (treesit-node-text (car dotted) t))
+               (setq name1 (treesit-node-text (caddr dotted) t)))))
+          ("identifier"
+           (if name1
+               (setq name2 (treesit-node-text child t))
+             (setq name1 (treesit-node-text child t))))
+          ("alias"
+           (if name2
+               (setq alias2 (treesit-node-text child t))
+             (setq alias1 (treesit-node-text child t))))))
+      (setq children (cdr children)))
+    (if name2
+        (cons (list schema1 name1 alias1)
+              (cons (list schema2 name2 alias2)
+                    result))
+        (cons (list schema1 name1 alias1) result))))
+    
+
+(defun sql-pg-ts-mode--extract-from (node)
+  ;; skip FROM node
+  (let ((children (cdr (treesit-node-children node)))
+        (result '()))
+    (while children
+      (let ((child (car children)))
+        (pcase (treesit-node-type child)
+          ("dotted_name"
+           (let ((dotted (treesit-node-children child))
+                 (schema nil)
+                 (name nil)
+                 (alias nil))
+             (setq schema (treesit-node-text (car dotted) t))
+             (setq name (treesit-node-text (caddr dotted) t))
+             (setq children (cdr children))
+             (when (and (equal (treesit-node-type (car children)) "AS")
+                        (cadr children))
+               (setq alias (treesit-node-text (cadr children) t))
+               (setq children (cddr children)))
+             (setq result (cons (list schema name alias) result))))
+          ("identifier"
+           (let ((name (treesit-node-text child t))
+                 (alias nil))
+             (setq children (cdr children))
+             (when (and (equal (treesit-node-type (car children)) "AS")
+                        (cadr children))
+               (setq alias (treesit-node-text (cadr children) t))
+               (setq children (cddr children)))
+           (setq result (cons
+                         (list (sql-pg-ts-mode-default-schema) name alias)
+                         result))))
+          ("join_clause"
+           (setq result (append result
+                                (sql-pg-ts-mode--extract-join-clause child)))
+           (setq children (cdr children)))
+          (_ (setq children (cdr children))))))
+    result))
+
+
+(defun sql-pg-ts-mode--extract-select (node)
+  nil)
+
+
 ;;;###autoload
 (define-derived-mode sql-pg-ts-mode sql-mode "SQL"
   "Major mode for editing postgres SQL, powered by tree-sitter."
