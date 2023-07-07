@@ -455,9 +455,48 @@
     result))
 
 
-(defun sql-pg-ts-mode--extract-select (node)
-  nil)
+(defun sql-pg-ts-mode--extract-select (node) 
+ nil)
 
+
+;; Database format :
+;; (alist
+;;  (database_name . (alist
+;;                    (schema_name . (alist
+;;                                    ('tables .
+;;                                             (hashtable string -> (alist ('name . string)
+;;                                                                         ('position . filename offset-start offset-end)
+;;                                                                         ('comment . string)
+;;                                                                         ('columns . (hashtable string -> (alist ('name . string)
+;;                                                                                                                 ('position . filename offset-start offset-end)
+;;                                                                                                                 ('comment . string)
+;;                                                                                                                 ('type . string)))))))
+;;                                    ('functions . (hashtable string -> (alist ('name . string) ('position . filename offset-start offset-end)))))))))
+
+;; TODO: where to put extensions ?
+;; TODO: where to put default functions ? (does functions name resolution change if we change the default schema name ?)
+;; TODO: does functions are schema dependant ?
+
+(defun sql-pg-ts-mode--extract-db-from-schema (buffer)
+  "Extract the database definition from schema buffer."
+  (let* ((top-level-node (treesit-node-top-level
+                         (treesit-node-at (point-min))
+                         (lambda (x) (equal (treesit-node-type x) "source_file"))))
+         (children (treesit-node-children top-level-node)))
+    (while children
+      (pcase (treesit-node-type child)
+        ("create_table_statement"
+         (let ()
+           (pcase
+               ("identifier"
+               ("table_parameters"
+         )
+        ;; TODO: the create_extension_statement type because it can add functions
+        ;; TODO: comment_statement usefull data to show to the user
+        ;; TODO: create_function_statement
+      (setq children (cdr children)))
+    
+  )
 
 ;;;###autoload
 (define-derived-mode sql-pg-ts-mode sql-mode "SQL"
