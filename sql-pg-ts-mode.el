@@ -460,9 +460,9 @@
 
 
 ;; Database format :
-;; (alist
-;;  (database_name . (alist
-;;                    (schema_name . (alist
+;; (hashtable
+;;  database_name -> (hashtable
+;;                    (schema_name -> (alist
 ;;                                    ('tables .
 ;;                                             (hashtable string -> (alist ('name . string)
 ;;                                                                         ('position . filename offset-start offset-end)
@@ -482,21 +482,38 @@
   (let* ((top-level-node (treesit-node-top-level
                          (treesit-node-at (point-min))
                          (lambda (x) (equal (treesit-node-type x) "source_file"))))
+         (tables (make-hash-table :test #'equal))
          (children (treesit-node-children top-level-node)))
     (while children
-      (pcase (treesit-node-type child)
-        ("create_table_statement"
-         (let ()
-           (pcase
-               ("identifier"
-               ("table_parameters"
-         )
-        ;; TODO: the create_extension_statement type because it can add functions
-        ;; TODO: comment_statement usefull data to show to the user
-        ;; TODO: create_function_statement
-      (setq children (cdr children)))
-    
-  )
+      (let ((child (car children)))
+        (setq children (cdr children))
+        (pcase (treesit-node-type child)
+          ("create_table_statement"
+           (let ((table-store '())
+                 (children2 (treesit-node-children child)))
+             (while children2
+               (let ((n (car children2)))
+                 (setq children2 (cdr children2))
+                 (pcase (treesit-node-type n)
+                   ("identifier" (setq table-store (cons `(name . ,(treesit-node-text n t)) table-store)))
+                   ("table_parameters"
+                    (let ((children3 (treesit-node-children n))
+                          (columns (make-hash-table :test #'equal)))
+                      (while children3
+                        (let ((n2 (car children3)))
+                          (setq children3 (cdr children3))
+                          (when (equal (treesit-node-type n2) "table_column")
+                            (puthash (treesit-node-text (treesit-node-child-by-field-name n2 "name") t)
+                                     `((name . ,(treesit-node-text (treesit-node-child-by-field-name n2 "name") t))
+                                       (type . ,(treesit-node-text (treesit-node-child-by-field-name n2 "type") t)))
+                                     columns))))
+                      (setq table-store (cons `(columns . ,columns) table-store)))))))
+             (puthash (cdr (assoc 'name table-store)) table-store tables)))
+          ;; TODO: the create_extension_statement type because it can add functions (ajouter un hook avec les infos (database))
+          ;; TODO: comment_statement usefull data to show to the user
+          ;; TODO: create_function_statement
+          )))
+    tables))
 
 ;;;###autoload
 (define-derived-mode sql-pg-ts-mode sql-mode "SQL"
