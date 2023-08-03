@@ -27,7 +27,7 @@
 (require 'treesit)
 
 
-(defvar sql-pg-ts-mode--keywords
+(defvar sql-pg-ts-mode-keywords
   '("ADD"
     "AFTER"
     "ALL"
@@ -253,6 +253,24 @@
     "WORK")
   "Postgres SQL keywords")
 
+(defvar sql-pg-ts-mode-types
+  '("int4range" "int8range" "numrange" "tsrange" "tstzrange" "daterange"
+    "any" "anyarray" "anyelement" "anyenum" "anynonarray" "cstring" "internal"
+    "language_handler" "fdw_handler" "record" "trigger" "void" "opaque"
+    "bit" "bit()" "bit varying" "bit varying()" "bigint" "int8" "bigserial"
+    "serial8" "boolean" "bool" "box" "bytea" "character" "character()"
+    "char" "char()" "character varying" "character varying()" "varchar()"
+    "varchar" "cidr" "circle" "date" "double precision" "float8" "inet"
+    "integer" "int" "int4"
+    ;; TODO interval [ fields ] [ (p) ]
+    "json" "jsonb" "line" "lseg" "macaddr" "money" "numeric" "numeric(p,s)"
+    "decimal" "decimal(p,s)" "path" "pg_lsn" "point" "polygon" "real" "float4"
+    "smallint" "int2" "smallserial" "serial2" "serial" "serial4" "text" "time"
+    "time without time zone" "time with time zone" "time(0) without time zone"
+    "time(0) with time zone" "timestamp without time zone" "timestamp with time zone"
+    "timestamp(0) without time zone" "timestamp(0) with time zone" "timetz"
+    "timestamptz" "tsquery" "tsvector" "txid_snapshot" "uuid" "xml")
+  "Postgres Types")
 
 (defun sql-pg-ts-mode--fontify-interval-keyword (node override start end &rest _)
   "Manualy fontify the keyword INTERVAL."
@@ -287,7 +305,7 @@
    :language 'sql
    :override t
    :feature 'keyword
-   `(([,@sql-pg-ts-mode--keywords]) @font-lock-keyword-face
+   `(([,@sql-pg-ts-mode-keywords]) @font-lock-keyword-face
      (interval_expression) @sql-pg-ts-mode--fontify-interval-keyword)
    :language 'sql
    :override t
@@ -378,6 +396,10 @@
   "public")
 
 
+(defun sql-pg-ts-mode-current-database-name ()
+  "")
+
+
 (defun sql-pg-ts-mode--extract-join-clause (node)
   (let* ((children (treesit-node-children node))
          (child (car children))
@@ -417,6 +439,7 @@
     
 
 (defun sql-pg-ts-mode--extract-from (node)
+  "extract info from the from node in the form of '((schema table-name alias-or-nil) ...)"
   ;; skip FROM node
   (let ((children (cdr (treesit-node-children node)))
         (result '()))
@@ -459,6 +482,9 @@
  nil)
 
 
+(defvar sql-pg-ts-mode--datastore nil)
+
+
 ;; Database format :
 ;; (hashtable
 ;;  database_name -> (hashtable
@@ -472,6 +498,19 @@
 ;;                                                                                                                 ('comment . string)
 ;;                                                                                                                 ('type . string)))))))
 ;;                                    ('functions . (hashtable string -> (alist ('name . string) ('position . filename offset-start offset-end)))))))))
+
+(defun sql-pg-ts-mode-make-database (database-name)
+  (let ((db (make-hash-table :test #'equal))
+        (default-schema-db (make-hash-table :test #'equal))
+        (functions-db (make-hash-table :test #'equal)))
+    (puthash "array_agg" '((name . "array_agg")) functions-db)
+    (puthash
+     (sql-pg-ts-mode-default-schema)
+     `((tables . ,(make-hash-table :test #'equal))
+       (functions . ,functions-db))
+     default-schema-db)
+    (puthash database-name default-schema-db db)
+    db))
 
 ;; TODO: where to put extensions ?
 ;; TODO: where to put default functions ? (does functions name resolution change if we change the default schema name ?)
@@ -514,6 +553,91 @@
           ;; TODO: create_function_statement
           )))
     tables))
+
+
+(defun sql-pg-ts-mode--complete-tables (candidate-node)
+  (when sql-pg-ts-mode--datastore
+    (when-let* ((db (gethash (sql-pg-ts-mode-current-database-name)
+                       sql-pg-ts-mode--datastore))
+                (schema (if (equal (treesit-node-type candidate-node) "dotted_name")
+                            (treesit-node-text (treesit-node-child candidate-node 0) t)
+                          (sql-pg-ts-mode-default-schema)))
+                (scheme-db (gethash schema db)))
+      (list
+       (treesit-node-start candidate-node)
+       (treesit-node-end candidate-node)
+       (cdr (assoc 'tables scheme-db))))))
+
+
+(defun sql-pg-ts-mode--complete-identifiers (candidate-node)
+  (let* ((select-node (treesit-parent-until
+                       candidate-node
+                       (lambda (node) (equal (treesit-node-type node) "select_statement"))))
+         (from-node (treesit-search-subtree
+                     select-node
+                     (lambda (node) (equal (treesit-node-type node) "from_clause"))))
+         (defined-tables (when from-node (sql-pg-ts-mode--extract-from from-node))))
+      (list
+       (treesit-node-start candidate-node)
+       (treesit-node-end candidate-node)
+       (when (and defined-tables sql-pg-ts-mode--datastore)
+           (when-let ((db (gethash (sql-pg-ts-mode-current-database-name)
+                                   sql-pg-ts-mode--datastore)))
+             (cl-loop
+              for item in defined-tables
+              append (when-let* ((schema-db (gethash (car item) db))
+                                  (table-name (cadr item))
+                                  (table-db (gethash table-name (cdr (assoc 'tables schema-db)))))
+                        (let ((alias (when (caddr item) (concat (caddr item) "."))))
+                          (append
+                           (if alias (list alias table-name) (list table-name))
+                           (cl-loop
+                            for column in (hash-table-keys (cdr (assoc 'columns table-db)))
+                            append (list
+                                     (if alias (concat alias column) column)
+                                     column
+                                     (concat table-name "." column))))))))))))
+
+(defun sql-pg-ts-mode--treesit-node-prev (node)
+  (let ((prev (treesit-node-prev-sibling node))
+        (parent node))
+      (while (and (not prev) parent)
+        (setq parent (treesit-node-parent parent))
+        (setq prev (treesit-node-prev-sibling parent)))
+      prev))
+       
+
+(defun sql-pg-ts-mode-completion-at-point ()
+  ;; TODO: it doesn't work (looking-back "\\([^.]+[.][^.]*\\)\\|\\([^.]+\\)")
+  ;; and it should also take into account "identifier" inside quote
+  (let ((node (treesit-node-at (point))))
+    (pcase (treesit-node-type node)
+      ("::" (list (treesit-node-start node)
+                  (treesit-node-end node)
+                  sql-pg-ts-mode-types))
+      ("ERROR" (list (treesit-node-start node)
+                  (treesit-node-end node)
+                  sql-pg-ts-mode-keywords))
+      ("identifier"
+       ;; TODO: Do only the select case
+       (let ((select-node (treesit-parent-until
+                           node
+                           (lambda (node) (equal (treesit-node-type node) "select_statement")))))
+         (when select-node
+           (let* ((parent-node (treesit-node-parent node))
+                  (candidate-node (if (equal (treesit-node-type parent-node) "dotted_name") parent-node node))
+                  (prev-node (sql-pg-ts-mode--treesit-node-prev candidate-node)))
+             (pcase (treesit-node-type prev-node)
+               ("AS" nil)
+               ("," (if (treesit-parent-until
+                         node
+                         (lambda (node) (equal (treesit-node-type node) "function_call")))
+                        (sql-pg-ts-mode--complete-identifiers candidate-node)
+                      (sql-pg-ts-mode--complete-tables candidate-node)))
+               ((or "FROM" "JOIN")
+                (sql-pg-ts-mode--complete-tables candidate-node))
+               (_ (sql-pg-ts-mode--complete-identifiers candidate-node))))))))))
+
 
 ;;;###autoload
 (define-derived-mode sql-pg-ts-mode sql-mode "SQL"
