@@ -1109,7 +1109,7 @@
        (cdr (assoc 'tables scheme-db))))))
 
 
-(defun sql-pg-ts-mode--complete-identifiers (candidate-node)
+(defun sql-pg-ts-mode--complete-identifiers (candidate-node start end)
   (let* ((select-node (treesit-parent-until
                        candidate-node
                        (lambda (node) (equal (treesit-node-type node) "select_statement"))))
@@ -1118,8 +1118,8 @@
                      (lambda (node) (equal (treesit-node-type node) "from_clause"))))
          (defined-tables (when from-node (sql-pg-ts-mode--extract-from from-node))))
       (list
-       (treesit-node-start candidate-node)
-       (treesit-node-end candidate-node)
+       start
+       end
        (when (and defined-tables sql-pg-ts-mode--datastore)
            (when-let ((db (gethash (sql-pg-ts-mode-current-database-name)
                                    sql-pg-ts-mode--datastore)))
@@ -1161,6 +1161,18 @@
       ("ERROR" (list (treesit-node-start node)
                      (treesit-node-end node)
                      sql-pg-ts-mode-keywords))
+      ("."
+       (let ((select-node (treesit-parent-until
+                           node
+                           (lambda (node) (equal (treesit-node-type node) "select_statement")))))
+         (when select-node
+           ;; TODO: si on ne trouve pas le from_clause
+           ;; (let* ((text-start (buffer-substring-no-properties (treesit-node-start select-node) (treesit-node-start prev-node)))
+           ;;        (text-end (buffer-substring-no-properties (treesit-node-end prev-node) (treesit-node-end select-node)))
+           ;;        (new-node (treesit-parse-string (concat text-start " " text-end) 'sql)))
+           (let ((prev-node (treesit-node-prev-sibling node)))
+             (when (equal (treesit-node-type prev-node) "identifier")
+               (sql-pg-ts-mode--complete-identifiers node (treesit-node-start prev-node) (treesit-node-end node)))))))
       ("identifier"
        ;; TODO: Do only the select case
        (let ((select-node (treesit-parent-until
@@ -1179,11 +1191,11 @@
                          node
                          (lambda (node) (let ((type (treesit-node-type node)))
                                           (or (equal type "function_call") (equal type "select_clause")))))
-                        (sql-pg-ts-mode--complete-identifiers candidate-node)
+                        (sql-pg-ts-mode--complete-identifiers candidate-node (treesit-node-start candidate-node) (treesit-node-end candidate-node))
                       (sql-pg-ts-mode--complete-tables candidate-node)))
                ((or "FROM" "JOIN")
                 (sql-pg-ts-mode--complete-tables candidate-node))
-               (_ (sql-pg-ts-mode--complete-identifiers candidate-node))))))))))
+               (_ (sql-pg-ts-mode--complete-identifiers candidate-node (treesit-node-start candidate-node) (treesit-node-end candidate-node)))))))))))
 
 
 ;;;###autoload
