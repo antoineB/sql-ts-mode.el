@@ -27,6 +27,7 @@
 ;; TODO: les cte RECURSIVE ne sont pas bien parsé
 
 (require 'treesit)
+(require 'seq)
 
 (declare-function treesit-parser-create "treesit.c")
 (declare-function treesit-induce-sparse-tree "treesit.c")
@@ -312,6 +313,26 @@
     keyword_jsonfile)
   "Treesit parser keyword nodes")
 
+(defvar sql-ts-mode-types
+  '("int4range" "int8range" "numrange" "tsrange" "tstzrange" "daterange"
+    "any" "anyarray" "anyelement" "anyenum" "anynonarray" "cstring" "internal"
+    "language_handler" "fdw_handler" "record" "trigger" "void" "opaque"
+    "bit" "bit()" "bit varying" "bit varying()" "bigint" "int8" "bigserial"
+    "serial8" "boolean" "bool" "box" "bytea" "character" "character()"
+    "char" "char()" "character varying" "character varying()" "varchar()"
+    "varchar" "cidr" "circle" "date" "double precision" "float8" "inet"
+    "integer" "int" "int4"
+    ;; TODO: interval [ fields ] [ (p) ]
+    "json" "jsonb" "line" "lseg" "macaddr" "money" "numeric" "numeric(p,s)"
+    "decimal" "decimal(p,s)" "path" "pg_lsn" "point" "polygon" "real" "float4"
+    "smallint" "int2" "smallserial" "serial2" "serial" "serial4" "text" "time"
+    "time without time zone" "time with time zone" "time(0) without time zone"
+    "time(0) with time zone" "timestamp without time zone" "timestamp with time zone"
+    "timestamp(0) without time zone" "timestamp(0) with time zone" "timetz"
+    "timestamptz" "tsquery" "tsvector" "txid_snapshot" "uuid" "xml")
+  "Postgres Types")
+
+;; TODO: Are they implemented now ?
 ;; not implemented in parser "&&" "&" ">>" "<<" "#" "|" "!!" "~" "!~" "~*" "!~*"
 ;; "@"
 (defvar sql-ts-mode--operators
@@ -467,6 +488,305 @@
        " @"
        (number-to-string (treesit-node-start (cdr (assoc 'statement captures)))))
       "Anonymous")))
+
+
+;; ;; TODO: The completion doesn't take into account the case.
+;; ;;
+;; ;; Solutions look at the first keyword (SELECT, INSERT, UPDATE ...) to know
+;; ;; the case of the user style and then upcase/lowercase all the completions
+
+(defun sql-ts-mode--extract-froms (node &optional no-prefix)
+  (let* ((schema (gethash sql-ts-mode--default-schema sql-ts-mode--current-db))
+         (tables (cdr (assoc 'tables schema)))
+         (views (cdr (assoc 'views schema)))
+         (statement (treesit-parent-until node (lambda (node) (equal (treesit-node-type node) "statement")))))
+    (list (treesit-node-start node) (treesit-node-end node)
+          (if statement
+              (let ((cte (let ((n (treesit-node-child statement 1))) (when (equal (treesit-node-type n) "cte") n)))
+                    (captures (treesit-query-capture statement
+                                                     '((from (relation) @relation)
+                                                       (join (relation) @relation))))
+                    (result '()))
+                ;; TODO: look for cte (sql-ts-mode--comp-extract-cte cte-node)
+                ;; TODO: "name.^" where name could be a schema and not a table name
+                (dolist (capture captures result)
+                  (when (or (not cte) (> (treesit-node-start (cdr capture)) (treesit-node-end cte)))
+                    (let* ((name (treesit-node-text (treesit-node-child-by-field-name (treesit-node-child (cdr capture) 0) "name") t))
+                           (alias (treesit-node-text (treesit-node-child-by-field-name (cdr capture) "alias") t))
+                           (columns (or (gethash name tables) (gethash name views))))
+                      (when columns
+                        (dolist (column (hash-table-keys columns))
+                          (if no-prefix
+                              (setq result (cons column result))
+                            (progn
+                              (when alias
+                                (setq result (cons (concat alias "." column) result)))
+                              (setq result (cons (concat name "." column) result)))))))))
+                result)
+            '()))))
+
+;; TODO: only select statements
+;; TODO: parametrize the style of keywords (uppercase, lowercase, capitalized)
+(defun sql-ts-mode-completion-at-point ()
+  (let* ((schema (gethash sql-ts-mode--default-schema sql-ts-mode--current-db))
+         (tables (cdr (assoc 'tables schema)))
+         (views (cdr (assoc 'views schema)))
+         (before-node (save-excursion
+                         (while (or (eq (point) (point-min))
+                                    (eq (char-after) ?\s)
+                                    (eq (char-after) ?\n)
+                                    (eq (char-after) ?\r)
+                                    (eq (char-after) ?\v)
+                                    (eq (char-after) ?\t)
+                                    (eq (char-after) ?\f))
+                           (goto-char (- (point) 1)))
+                         (treesit-node-at (point)))))
+    (pcase (treesit-node-type before-node)
+      ;; TODO: ERROR, UNKNOWN, MISSING
+      ((or "keyword_from" "keyword_join")
+       ;; TODO: look for cte (sql-ts-mode--comp-extract-cte cte-node)
+       (list (point) (point)
+             (hash-table-keys tables)))
+
+      ("::"
+       (list (point) (point) sql-ts-mode-types))
+
+      ;; TODO: from clause "FROM schema.^"
+      ;; ((and "."
+      ;;       (pred (lambda (_)
+      ;;               (treesit-parent-until
+      ;;                before-node
+      ;;                (lambda (node) (equal (treesit-node-type node) "relation"))))))
+      ;;  (let ((schema (treesit-node-parent before-node))
+
+      ((and "."
+            (pred (lambda (_)
+                    (equal (treesit-node-type (treesit-node-parent before-node))
+                           "object_reference"))))
+       (sql-ts-mode--extract-froms before-node))
+
+      ((and "identifier"
+            (pred (lambda (_)
+                    (and (treesit-parent-until
+                         before-node
+                         (lambda (node) (equal (treesit-node-type node) "relation")))
+                        ;; not an alias
+                        (not (equal
+                              (treesit-node-child-by-field-name (treesit-node-parent before-node) "alias")
+                              before-node))))))
+       ;; A table name is expected
+       ;; TODO: cte
+       ;;
+       ;; Check if in the case "schema.table_na^"
+       (list (treesit-node-start before-node) (treesit-node-end before-node)
+             (if (equal (treesit-node-type (treesit-node-parent before-node)) "object_reference")
+                 (let* ((parent-node (treesit-node-parent before-node))
+                        (schema-name (treesit-node-text (treesit-node-child parent-node 0) t))
+                        (table-name (treesit-node-text (treesit-node-child parent-node 1) t)))
+                   (if table-name
+                       (let* ((schema-db (gethash schema-name sql-ts-mode--current-db))
+                              (tables (and schema-db (cdr (assoc 'tables (gethash table-name schema-db))))))
+                         (if tables (hash-table-keys tables) '()))
+                     (append
+                      (hash-table-keys sql-ts-mode--current-db)
+                      (hash-table-keys tables)))))))
+
+       ;; TODO: a keyword
+       ("identifier"
+        ;; Check if in the case "alias_name.column_na^"
+        (let ((parent-node (treesit-node-parent before-node)))
+          (if (equal (treesit-node-type parent-node) "field")
+                (sql-ts-mode--extract-froms parent-node)
+            (list (treesit-node-start before-node) (treesit-node-end before-node)
+                  (append
+                   ;; schema name
+                   (hash-table-keys sql-ts-mode--current-db)
+                   ;; table name
+                   (hash-table-keys (cdr (assoc 'tables (gethash sql-ts-mode--default-schema sql-ts-mode--current-db))))
+                   (hash-table-keys (cdr (assoc 'views (gethash sql-ts-mode--default-schema sql-ts-mode--current-db))))
+                   ;; function name
+                   (hash-table-keys (cdr (assoc 'functions (gethash sql-ts-mode--default-schema sql-ts-mode--current-db))))
+                   ;; columns name
+                   (sql-ts-mode--extract-froms parent-node t)))))))))
+
+
+;;   (let ((node (treesit-node-at (point))))
+;;     (pcase (treesit-node-type node)
+;;       ("ERROR" (list (treesit-node-start node)
+;;                      (treesit-node-end node)
+;;                      sql-pg-ts-mode-keywords))
+;;       ("."
+;;        (let ((select-node (treesit-parent-until
+;;                            node
+;;                            (lambda (node) (equal (treesit-node-type node) "select_statement")))))
+;;          (when select-node
+;;            ;; TODO: si on ne trouve pas le from_clause
+;;            ;; (let* ((text-start (buffer-substring-no-properties (treesit-node-start select-node) (treesit-node-start prev-node)))
+;;            ;;        (text-end (buffer-substring-no-properties (treesit-node-end prev-node) (treesit-node-end select-node)))
+;;            ;;        (new-node (treesit-parse-string (concat text-start " " text-end) 'sql)))
+;;            (let ((prev-node (treesit-node-prev-sibling node)))
+;;              (when (equal (treesit-node-type prev-node) "identifier")
+;;                (sql-pg-ts-mode--complete-identifiers node (treesit-node-start prev-node) (treesit-node-end node)))))))
+;;       ("identifier"
+;;        ;; TODO: Do only the select case
+;;        (let ((select-node (treesit-parent-until
+;;                            node
+;;                            (lambda (node) (equal (treesit-node-type node) "select_statement")))))
+;;          (when select-node
+;;            (let* ((parent-node (treesit-node-parent node))
+;;                   (candidate-node (if (equal (treesit-node-type parent-node) "dotted_name") parent-node node))
+;;                   (prev-node (sql-pg-ts-mode--treesit-node-prev candidate-node)))
+;;              (pcase (treesit-node-type prev-node)
+;;                ("::" (list (treesit-node-start node)
+;;                            (treesit-node-end node)
+;;                            sql-pg-ts-mode-types))
+;;                ("AS" nil)
+;;                ("," (if (treesit-parent-until
+;;                          node
+;;                          (lambda (node) (let ((type (treesit-node-type node)))
+;;                                           (or (equal type "function_call") (equal type "select_clause")))))
+;;                         (sql-pg-ts-mode--complete-identifiers candidate-node (treesit-node-start candidate-node) (treesit-node-end candidate-node))
+;;                       (sql-pg-ts-mode--complete-tables candidate-node)))
+;;                ((or "FROM" "JOIN")
+;;                 (sql-pg-ts-mode--complete-tables candidate-node))
+;;                (_ (sql-pg-ts-mode--complete-identifiers candidate-node (treesit-node-start candidate-node) (treesit-node-end candidate-node)))))))))))
+
+;; The possible cases of completion:
+;;
+;; FROM|JOIN [schema.]table
+;;
+;; CAST([alias/table.]column AS type)
+;;
+;; ::type
+;;
+;; [schema.]function_name|[alias/table.]column
+;;
+;; KEYWORD
+
+
+;; Fomat of the schema definition:
+;;
+;; TODO: add comment to column definition, table and function they can act as documentation
+;; (hash ("schema name" -> (alist ('tables . (hash "name" -> (hash "name" -> "type")))
+;;                                ('views . ^same_as_table)
+;;                                ('extensions . (list "name"))
+;;                                ('functions . (hash "name" -> (alist ('return . "type")
+;;                                                                     ('arguments . (list "name" "type"))))))))
+
+(defvar sql-ts-mode--current-db nil)
+
+(defvar sql-ts-mode--default-schema "public")
+
+(defun sql-ts-mode--add-table (definitions schema-name table-name &optional type)
+  (let ((type (or (and type 'views) 'tables))
+        (s-name (or schema-name sql-ts-mode--default-schema)))
+    (when (not (gethash s-name definitions))
+      (puthash s-name `((tables . ,(make-hash-table :test #'equal))
+                        (views . ,(make-hash-table :test #'equal))
+                        (extensions . ())
+                        (functions . ,(make-hash-table :test #'equal)))
+               definitions))
+    (puthash
+     table-name
+     (make-hash-table :test #'equal)
+     (cdr (assoc type (gethash s-name definitions))))))
+
+(defun sql-ts-mode--add-column (definitions schema-name table-name column-name column-type &optional type)
+  (let* ((type (or (and type 'views) 'tables))
+         (table-hash (gethash table-name (cdr (assoc type (gethash schema-name definitions))))))
+    (puthash column-name column-type table-hash)))
+
+;; TODO: alter_table
+;; TODO: create_function
+;; TODO: create_extension
+;; TODO: create_view try to discover types
+(defun sql-ts-mode--parse-schema (definitions)
+    (let ((captures (treesit-query-capture
+                       (treesit-buffer-root-node)
+                       '((create_table) @create_table
+                         (alter_table) @alter_table
+                         (create_function) @create_function
+                         (create_view) @create_view
+                         (create_extension) @create_extension)))
+          (result (make-hash-table :test #'equal)))
+      (dolist (capture captures result)
+        (pcase capture
+          (`(create_table . ,node-table)
+           (let* ((captures (treesit-query-capture node-table
+                                                 '((create_table (object_reference) @table-name)
+                                                   (column_definition name: (identifier) @column-name
+                                                                      type: (_) @column-type))))
+                  (capture-name (car captures))
+                  (capture-columns (let ((result '())
+                                         (current nil))
+                                     (dolist (capture (cdr captures) result)
+                                       (if current
+                                           (setq result (cons (cons current (cdr capture)) result)
+                                                 current nil)
+                                         (setq current (cdr capture))))
+                                     (reverse result))))
+             (message (prin1-to-string capture-name))
+             (pcase capture-name
+               (`(table-name . ,node)
+                (let ((schema-name (if (treesit-node-child-by-field-name node "schema")
+                                       (treesit-node-text (treesit-node-child-by-field-name node "schema") t)
+                                     sql-ts-mode--default-schema))
+                      (table-name (treesit-node-text (treesit-node-child-by-field-name node "name") t)))
+                  (sql-ts-mode--add-table definitions schema-name table-name)
+                  (dolist (capture capture-columns)
+                    (sql-ts-mode--add-column
+                     definitions
+                     schema-name
+                     table-name
+                     (treesit-node-text (car capture) t)
+                     (treesit-node-text (cdr capture) t)))))
+                (_ (error "Cannot capture table-name of CREATE TABLE line %d" (treesit-node-start node-table))))))
+          (`(create_view . ,node-view)
+           (let* ((named (treesit-query-capture
+                          node-view
+                          '((create_view (object_reference)
+                                         :anchor "(" :anchor (identifier) @identifier ("," (identifier) @identifier)*
+                                         :anchor ")"))))
+                  (view-name (treesit-query-capture node-view '((create_view (object_reference) @name))))
+                  (node-view-name (cdar view-name))
+                  (schema-name (if (treesit-node-child-by-field-name node-view-name "schema")
+                                   (treesit-node-text (treesit-node-child-by-field-name node-view-name "schema") t)
+                                 sql-ts-mode--default-schema))
+                  (table-name (treesit-node-text (treesit-node-child-by-field-name node-view-name "name") t)))
+                  (sql-ts-mode--add-table definitions schema-name table-name 'views)
+                  (if named
+                      (dolist (name named)
+                        (sql-ts-mode--add-column definitions schema-name table-name named nil 'views))
+                    (let ((exprs (treesit-query-capture
+                                  node-view
+                                  '((select_expression (term) @expr ("," (term) @expr)*)))))
+                      (dolist (expr exprs)
+                        (if (treesit-node-child-by-field-name (cdr expr) "alias")
+                            (sql-ts-mode--add-column
+                             definitions
+                             schema-name
+                             table-name
+                             (treesit-node-text (treesit-node-child-by-field-name (cdr expr) "alias") t)
+                             nil
+                             'vews)
+                          (let ((identifiers (treesit-query-capture (cdr expr) '((identifier) @identifier))))
+                            (when identifiers
+                              (sql-ts-mode--add-column
+                               definitions
+                               schema-name
+                               table-name
+                               (treesit-node-text (cdar (last identifiers)) t)
+                               nil
+                               'views)))))))))))))
+
+(defun sql-ts-mode--parse-schema-file (filename)
+  (setq sql-ts-mode--current-db (make-hash-table :test #'equal))
+  (with-temp-buffer
+    (insert-file-contents filename)
+    (let ((parser (treesit-parser-create 'sql)))
+      (sql-ts-mode--parse-schema sql-ts-mode--current-db)
+      (treesit-parser-delete parser))))
+
 
 
 ;;;###autoload
