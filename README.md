@@ -1,4 +1,4 @@
-# sql-pg-ts-mode.el
+# sql-ts-mode.el
 A treesitter mode for sql
 
 Add the treesitter grammar:
