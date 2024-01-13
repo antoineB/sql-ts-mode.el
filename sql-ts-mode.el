@@ -416,14 +416,61 @@
         (put-text-property node-start node-end 'fontified t)))))
 
 (defvar sql-ts-mode--indent-rules
-  '(sql
+  '((sql
     ((parent-is "program") column-0 0)
-    ((parent-is "statement") column-0 0)
-    ))
+    ((parent-is "select_expression") parent 0)
+    ((node-is "select") parent 0)
+    ((node-is "from") parent 0)
+    ((node-is "relation") prev-sibling 0)
+    ((node-is "join") parent 0)
+    ((and (node-is "keyword_on")
+          (parent-is "join")) prev-sibling 0)
+    ((node-is "where") standalone-parent 0)
+    ((node-is "group_by") parent 0)
+    ((node-is "order_by") parent 0)
+    ((and (node-is "keyword_having")
+          (parent-is "group_by")) parent 0)
+    ((lambda (node parent bol)
+       (let ((parent (treesit-node-parent node)))
+         (and parent
+              (equal (treesit-node-type node) "list")
+              (equal (treesit-node-type parent) "insert")
+              (not (equal (treesit-node-type (treesit-node-prev-sibling node)) "object_reference")))))
+     prev-sibling 0)
+    ((node-is "column_definitions") parent 0)
+    ((node-is "column_definition") prev-sibling 0)
+    (catch-all parent 0))))
+
+(defun sql-ts-mode--imenu-name (node)
+  (let ((captures (treesit-query-capture
+                   node
+                   '((statement (select) @type) @statement
+                     (statement (insert) @type) @statement
+                     (statement (update) @type) @statement
+                     (statement (delete) @type) @statement
+                     (statement (create_table) @type) @statement
+                     (statement (create_view) @type) @statement
+                     (statement (create_materialized_view) @type) @statement
+                     (statement (create_index) @type) @statement
+                     (statement (create_function) @type) @statement
+                     (statement (create_type) @type) @statement
+                     (statement (create_database) @type) @statement
+                     (statement (create_role) @type) @statement
+                     (statement (create_sequence) @type) @statement
+                     (statement (create_extension) @type) @statement
+                     (statement (create_trigger) @type) @statement
+                     (statement (create_schema) @type) @statement))))
+    ;; ((statement . #<treesit-node statement in 1-61>) (type . #<treesit-node insert in 1-61>))
+    (if captures
+      (concat
+       (treesit-node-type (cdr (assoc 'type captures)))
+       " @"
+       (number-to-string (treesit-node-start (cdr (assoc 'statement captures)))))
+      "Anonymous")))
 
 
 ;;;###autoload
-(define-derived-mode sql-ts-mode prog-mode "SQL"
+(define-derived-mode sql-ts-mode sql-mode "SQL"
   "Major mode for editing postgres SQL, powered by tree-sitter."
   :group 'ts-sql
 
@@ -431,23 +478,56 @@
    ((treesit-ready-p 'sql) (treesit-parser-create 'sql))
    (t (error "Tree-sitter for SQL isn't available")))
 
+  ;; Remove this sql-mode pecularity
+  (when (memq 'sql-indent-enable sql-mode-hook)
+    (setq sql-mode-hook (remq 'sql-indent-enable sql-mode-hook)))
+
   (setq-local treesit-text-type-regexp
               (regexp-opt '("comment"
                             "marginalia")))
 
   ;; Navigation.
-  (setq-local treesit-defun-type-regexp (regexp-opt '("statement")))
+  (setq-local treesit-defun-type-regexp "statement")
 
+  (setq-local treesit-block-type-regexp "statement")
 
-  ;; (setq-local treesit-block-type-regexp )
+  (setq-local treesit-sentence-type-regexp (regexp-opt '("select"
+                                                         "from"
+                                                         "join"
+                                                         "where"
+                                                         "group_by"
+                                                         "insert"
+                                                         "update"
+                                                         "delete"
+                                                         "create_table"
+                                                         "create_view"
+                                                         "create_materialized_view"
+                                                         "create_index"
+                                                         "create_function"
+                                                         "create_type"
+                                                         "create_database"
+                                                         "create_role"
+                                                         "create_sequence"
+                                                         "create_extension"
+                                                         "create_trigger"
+                                                         "create_schema")))
 
-  ;; (setq-local treesit-sentence-type-regexp treesit-defun-type-regexp)
-
-  ;; (setq-local treesit-sexp-type-regexp
-  ;;             (regexp-opt sql-pg-ts-mode--clause-nodes))
-
-
-  (setq-local treesit-simple-indent-rules sql-ts-mode--indent-rules)
+  (setq-local treesit-sexp-type-regexp
+              (regexp-opt (append
+                           '("identifier"
+                             "object_reference"
+                             "literal"
+                             "field"
+                             "parameter"
+                             "list"
+                             "case"
+                             "array"
+                             "between_expression"
+                             "invocation"
+                             "cast"
+                             "binary_expression"
+                             "unary_expression")
+                           (mapcar #'symbol-name sql-ts-mode--keywords))))
 
   (setq-local treesit-simple-indent-rules sql-ts-mode--indent-rules)
 
@@ -459,6 +539,10 @@
                 ( bracket delimiter operator)
                 ( punctuation )
                 ( error )))
+
+  ;; Imenu.
+  (setq-local treesit-simple-imenu-settings
+              '((nil "\\`statement\\'" nil sql-ts-mode--imenu-name)))
 
   (treesit-major-mode-setup))
 

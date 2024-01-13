@@ -1,5 +1,5 @@
 # sql-pg-ts-mode.el
-A treesitter mode for postgres sql
+A treesitter mode for sql
 
 Add the treesitter grammar:
 
